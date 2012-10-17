@@ -1,0 +1,506 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html>
+<head>
+    <title>Test Cases Burndown</title>
+    <meta charset="UTF-8">
+    <meta name="Name" content="Test Cases Burndown" />
+    <meta name="Version" content="0.1" />
+    <meta name="Client" content="TomTom - " />
+    <meta name="Vendor" content="Sagi Smolarski AgileSparks - sagi@agilesparks.com" />
+    <!--
+      Cumulative Flow Diagram of Test Cases for a specific iteration or release.
+      Created by looking at all stories and defects belonging to the specified
+      iteration (or release), gathering all the test cases for those work items,
+      and their associated test case results, and plotting the number of test
+      cases defined, passing, failing on each day.
+
+      The Algorithm:
+      Test case results are sorted by date, and we loop over all of them, recording
+      the latest status on a given day.
+      e.g. (TC = Test Case, TCR = Test Case Result)
+        TC1 created 10 Sep
+          TC1-TCR1 created 11 Sep blocked
+          TC1-TCR2 created 11 Sep fail
+          TC1-TCR3 created 13 Sep pass
+      add 1 "unknown" status on Sep 10
+      on Sep 11 remove 1 from status unknown, add one to blocked
+      on Sep 11 remove 1 from status blocked, add one to fail
+      On Sep 13 remove 1 from status fail, add one to success
+    -->
+
+    <script type="text/javascript" src="/apps/1.26/sdk.js"></script>
+    <!-- Use fully qualified link when running standalone (outside Rally)
+    <script type="text/javascript" src="https://rally1.rallydev.com/apps/1.26/sdk.js"></script>
+    -->
+    <script type="text/javascript" src="//cdnjs.cloudflare.com/ajax/libs/datejs/1.0/date.min.js"></script>
+    <script type="text/javascript" src="//www.google.com/jsapi"></script>
+    <script type="text/javascript" src="//cdnjs.cloudflare.com/ajax/libs/underscore.js/1.3.3/underscore-min.js"></script>
+    <!-- Rally uses dojo, but jQuery is more popular and we can use it as well -->
+    <script type="text/javascript" src="//ajax.googleapis.com/ajax/libs/jquery/1.8.2/jquery.min.js"></script>
+
+
+    <script type="text/javascript">
+      google.load('visualization', '1', {packages: ['corechart']});
+    </script>
+
+    <style>
+
+    .selectors {
+      margin-bottom: 12px;
+      padding: 7px;
+      margin-right: 7px;
+    }
+
+    .period-selector {
+      border: 2px;
+      margin: 2px;
+      padding: 7px;
+      border: solid medium #ccc;
+    }
+
+    .period-selector.selected {
+      border: solid medium black;
+
+    }
+
+    </style>
+
+    <script type="text/javascript">
+
+      var DEFAULT_OPTION = "------";
+      var milisecsPerDay = (24*60*60*1000);
+
+      var releaseDropdown = null;
+      var iterationDropdown = null;
+      var rallyDataSource = null;
+
+      // period = from iteration (or release) start to end
+      var periodStart = null;
+      var periodEnd = null;
+      var nPeriodDays = null;
+      var nDaysFromPeriodStart = null;
+
+      var slots;
+      var testCases; // number of test cases created on any day within the period
+      var testCasesList;
+
+      // Counters
+      var totalTestCases;
+      var processedTestCases;
+      var totalTestCaseResults;
+      var processedTestCaseResults;
+
+      var sortedTestCaseEvents;
+      var statuses;
+      var cfd;
+      var chartData;
+      var areaChart = null;
+      var processing = false; // guards against handling multiple
+                              // requests simultaneously
+
+      var toType = function(obj) {
+        return ({}).toString.call(obj).match(/\s([a-zA-Z]+)/)[1].toLowerCase()
+      }
+
+      function doneProcessing() {
+        $('#meter').hide();
+        summarizeData();
+        processing = false;
+        console.log('Done processing request');
+      }
+
+      function summarizeData() {
+        //// process all the events
+        // 1. Translate datestamps in events to days from period start
+        //    and create a list of statuses
+        sortedTestCaseEvents = [];
+        // Default list of available statuses
+        // We apply chart colors based on this order, but will gladly
+        // accommodate additional statuses thrown at us
+        statuses = ['No results','Inconclusive', 'Fail', 'Blocked', 'Error', 'Blocked', 'Pass'];
+        _.each(_.values(testCasesList), function(events) {
+          _.each(events, function(event) {
+            var date = Date.parse(event.date.slice(0, event.date.indexOf('.')));
+            event.date = ( date - periodStart )/ milisecsPerDay;
+            statuses.push(event.status);
+          });
+        });
+        statuses = _.uniq(statuses);
+        // 2. Sort the events under each testcase
+        _.each(_.values(testCasesList), function(events) {
+          var sortedEvents = _.sortBy(events, function(event){
+            return event.date; });
+          sortedTestCaseEvents.push(sortedEvents);
+        });
+
+        // 3. Initialize the CFD data structure
+        cfd = new Object();
+        var templateStatus = [];
+        _.each(_.range(nPeriodDays), function(day) {templateStatus.push(0);});
+
+        _.each(statuses, function(status) {
+          cfd[status] = _.clone(templateStatus);
+        });
+
+        // 4. Translate into a CFD
+        _.each(sortedTestCaseEvents, function(events) {
+          var lastStatus = null;
+          _.each(events, function(event) {
+            var day = Math.floor(event.date);
+            _.each(_.range(day, nPeriodDays), function(this_day){
+              if ( lastStatus !== null )
+                cfd[lastStatus][this_day] -=1;
+              cfd[event.status][this_day] +=1;
+            });
+            lastStatus=event.status;
+          });
+        });
+
+        // 5. Now we are left with full cfd data
+        // fresh : [12, 14, 15, 10, 5, 2]
+        // fail  : [0, 0, 2, 3, 4, 3, 1]
+        // pass  : [0, 1, 2, 3, 5, 8, 13]
+        // ...
+        // Now all we have to do is convert this to an array we can
+        // use to populate an array of data
+
+        chartData = [];
+        var header = ['Day'];
+
+
+
+        // push date strings into table as axis labels
+        _.each(slots, function(date){
+          chartData.push([date.toString("d-MMM-yyyy")]);
+        });
+
+        _.each(cfd, function(quantities, status) {
+          header.push(status);
+          _.each(quantities, function(amt, day){
+            if (day>nDaysFromPeriodStart) {
+              // don't chart future data
+              chartData[day].push(null);
+            } else {
+              chartData[day].push(amt);
+            }
+          });
+        });
+        chartData.unshift(header);
+
+        var gdata = google.visualization.arrayToDataTable(chartData);
+
+        // Create and draw the visualization.
+        areaChart = new google.visualization.AreaChart(document.getElementById('visualization'));
+        areaChart.draw(gdata, {
+          title : 'Test Cases Cumulative Flow Diagram',
+          isStacked: true,
+          width: 800,
+          height: 400,
+          vAxis: {title: "# of Test Cases"},
+          hAxis: {title: "Day"},
+          colors:['blue','grey','red', 'gold', 'orange','green']
+        });
+
+      }
+
+      function processTestCaseResult(result) {
+        processedTestCaseResults += 1;
+        $('#test_case_results_progress').attr('value', processedTestCaseResults);
+
+        console.log('Got test case result: ' + result.Verdict + ' on ' + result.CreationDate);
+        var testCaseOID = rally.sdk.util.Ref.getOidFromRef(result.TestCase._ref);
+        testCasesList[testCaseOID].push({
+          date: result.CreationDate,
+          status: result.Verdict
+        });
+        if (processedTestCaseResults === totalTestCaseResults && processedTestCases === totalTestCases ) {
+          console.log('Got all Test Case Results');
+          doneProcessing();
+        }
+      }
+
+      function processTestCaseResultError(error) {
+        console.log('!!! Error processing request to fetch test case result: ' + error);
+      }
+
+      function logTestCase(testCase) {
+        var createdOnStr = testCase.CreationDate;
+        var createdOnDate = Date.parse(createdOnStr.slice(0, [createdOnStr.indexOf('.')]));
+        var dayIndex = Math.floor(( createdOnDate - periodStart ) / milisecsPerDay);
+        dayIndex = Math.max(0, dayIndex); // test cases created before the period started
+                                          // count from day one.
+        dayIndex = Math.min(dayIndex, nPeriodDays); // Test cases created after the period ended
+                                              // are logged on the extra day
+        testCases[dayIndex] +=1 ; // Count the number of test cases created on that day
+      }
+
+      function processTestCase(testCase) {
+        console.log('Got test case: ' + testCase.FormattedID + ' + ' + testCase.Name);
+        logTestCase(testCase);
+        console.log('results: ' + testCase.Results.length);
+        totalTestCaseResults += testCase.Results.length;
+        $('#test_case_results_progress').attr('max', totalTestCaseResults);
+        for (var iResult=0; iResult<testCase.Results.length; iResult++) {
+          rallyDataSource.getRallyObject(
+              testCase.Results[iResult]._ref,
+              processTestCaseResult,
+              processTestCaseResultError);
+        }
+        processedTestCases += 1;
+        $('#test_cases_progress').attr('value', processedTestCases);
+        testCasesList[testCase.ObjectID] = [{
+          date: testCase.CreationDate,
+          status: 'No results'
+        }];
+        if (totalTestCases === processedTestCases) {
+          console.log('Got all test cases.');
+          if (totalTestCaseResults == 0) {
+            console.log('No Test Case Results');
+            doneProcessing();
+          }
+        }
+      }
+
+      function processTestCaseError(error) {
+          console.log('!!! Error processing request to fetch test case: ' + error);
+      }
+
+      function processStories(results) {
+        $('#stories_progress').attr('max', results.stories.length);
+        console.log('got ' + results.stories.length + ' stories..');
+        for (var i=0; i < results.stories.length; i++) {
+          console.log(results.stories[i].Name);
+          var testCases = results.stories[i].TestCases;
+          totalTestCases += testCases.length;
+          $('#test_cases_progress').attr('max', totalTestCases);
+          console.log('-- There are ' + testCases.length + ' Test cases');
+
+          for (var j=0; j<testCases.length; j++) {
+            // Fetch individual test cases
+            console.log('---- ' + testCases[j].Name + ': ' + testCases[j]._ref);
+            rallyDataSource.getRallyObject(
+              testCases[j]._ref,
+              processTestCase,
+              processTestCaseError);
+          }
+          $('#stories_progress').attr('value', results.stories.length);
+        }
+        console.log('There are '+ totalTestCases + ' test cases overall.');
+        if(totalTestCases == 0) {
+            console.log('No Test Cases');
+            doneProcessing();
+        }
+      }
+
+      var firstTimeReleaseTrigger=true;
+      function releaseSelected(dropdown, eventArgs) {
+
+        console.log('release selected: ' + eventArgs.value);
+        if (firstTimeReleaseTrigger) {
+          releaseDropdown.setValue(DEFAULT_OPTION);
+          firstTimeReleaseTrigger = false;
+          return;
+        }
+        if(eventArgs.value === DEFAULT_OPTION)
+          return;
+
+        var selectedItem = eventArgs.item;
+        var selectedValue = eventArgs.value;
+        var startDate = eventArgs.item.ReleaseStartDate;
+        var endDate = eventArgs.item.ReleaseDate;
+        var success = getTestCases(startDate, endDate, 'Release', selectedValue);
+
+        if(success) {
+          $('#radio-all').prop('checked',false)
+          iterationDropdown.setValue(DEFAULT_OPTION);
+          $('#ReleaseSelectorDiv').addClass('selected');
+          $('#IterationSelectorDiv').removeClass('selected');
+          $('#AllSelectorDiv').removeClass('selected');
+        } else {
+          releaseDropdown.setValue(DEFAULT_OPTION);
+        }
+
+      }
+
+      var firstTimeIterationTrigger=true;
+      function iterationSelected(dropdown, eventArgs) {
+
+        console.log('iteration selected: ' + eventArgs.value);
+        if (firstTimeIterationTrigger) {
+          iterationDropdown.setValue(DEFAULT_OPTION);
+          firstTimeIterationTrigger = false;
+          return;
+        }
+        if(eventArgs.value === DEFAULT_OPTION)
+          return;
+
+        var selectedItem = eventArgs.item;
+        var selectedValue = eventArgs.value;
+        var startDate = eventArgs.item.StartDate;
+        var endDate = eventArgs.item.EndDate;
+        var success = getTestCases(startDate, endDate, 'Iteration', selectedValue);
+
+        if(success) {
+          $('#radio-all').prop('checked',false)
+          releaseDropdown.setValue(DEFAULT_OPTION);
+          $('#IterationSelectorDiv').addClass('selected');
+          $('#ReleaseSelectorDiv').removeClass('selected');
+          $('#AllSelectorDiv').removeClass('selected');
+        } else {
+          iteratiionDropdown.setValue(DEFAULT_OPTION);
+        }
+
+      }
+
+      function getAll() {
+        // Get all test cases in the last year
+        var success = getTestCases(Date.today().addMonths(-6), Date.today().addDays(1).addMinutes(-1));
+        if (success) {
+          $('#IterationSelectorDiv').removeClass('selected');
+          $('#ReleaseSelectorDiv').removeClass('selected');
+          $('#AllSelectorDiv').addClass('selected');
+          releaseDropdown.setValue(DEFAULT_OPTION);
+          iterationDropdown.setValue(DEFAULT_OPTION);
+        } else {
+          $('#radio-all').prop('checked',false);
+        }
+
+      }
+
+      function getTestCases(start_date, end_date, period_type, period_name) {
+        // period_type can be "Iteration" or "Release"
+        // alternatively, a start date and end date can be specified. In that
+        // case, period_type and period_name need not be specified.
+        // Note that end date is assumed to be the end of the day (close to
+        // midnight)
+        console.log('getting test cases from: ' + start_date + 'till: ' + end_date);
+        if (processing) {
+          console.log('already processing... aborting');
+          alert('please wait for the current request to complete, or reload.');
+          return false;
+        }
+        processing = true;
+
+        $('.query_progress').removeAttr('value');
+        $('.query_progress').removeAttr('max');
+        $('#meter').show();
+        if (areaChart !== null)
+          areaChart.clearChart();
+
+        slots = [];
+        testCases = []; // number of test cases created on any day within the period
+        totalTestCases = 0;
+        processedTestCases = 0;
+        totalTestCaseResults = 0;
+        processedTestCaseResults = 0;
+        testCasesList = new Object();
+        var startDate = start_date;
+        var endDate = end_date;
+        if (toType(start_date) !== "date")
+          periodStart = Date.parse(startDate.slice(0, [startDate.indexOf('.')]));
+        else
+          periodStart = start_date;
+        if (toType(end_date) !== "date")
+          periodEnd = Date.parse(endDate.slice(0, [endDate.indexOf('.')]));
+        else
+          periodEnd = end_date;
+        nPeriodDays = Math.round((periodEnd - periodStart)/milisecsPerDay);
+        nDaysFromPeriodStart = (Date.today() - periodStart)/milisecsPerDay;
+        for (var day=periodStart.clone(), iDay=0; day<=periodEnd; day=day.addDays(1), iDay++) {
+          slots.push(day.clone());
+          testCases[iDay] = 0;
+        }
+
+        if (typeof period_type === "undefined") {
+          query = null
+        } else {
+          query = '(' + period_type + '.Name = "' + period_name + '")'
+        }
+        var queryConfig = {
+          type : 'hierarchicalrequirement',
+          key : 'stories',
+          fetch: 'Rank,FormattedID,Name,TestCases',
+          query: query,
+          order: 'Rank'
+        };
+        rallyDataSource.findAll(queryConfig, processStories);
+        return true;
+      }
+
+
+
+      function onDataRetrieved(a, eventArgs) {
+        //Add an "-----" (null) option
+        var all = {};
+        all[eventArgs.displayValueProperty] = DEFAULT_OPTION;
+        all[eventArgs.valueProperty] = DEFAULT_OPTION;
+        eventArgs.items.unshift(all);
+      }
+
+
+      function onLoad() {
+          rallyDataSource = new rally.sdk.data.RallyDataSource(
+                                                        '__WORKSPACE_OID__',
+                                                        '__PROJECT_OID__',
+                                                        '__PROJECT_SCOPING_UP__',
+                                                        '__PROJECT_SCOPING_DOWN__');
+
+          $('#meter').hide();
+          /*
+          Use hard-coded variables to test as a standalone app (outside of Rally)
+          rallyDataSource = new rally.sdk.data.RallyDataSource(
+                                                        '7655509103', // Workspace 1
+                                                        '7773082712', // ODS
+                                                        'false',
+                                                        'true');
+          */
+          var config = { label : "Select an iteration: " };
+          iterationDropdown = new rally.sdk.ui.IterationDropdown(config, rallyDataSource);
+          iterationDropdown.addEventListener("onDataRetrieved", onDataRetrieved);
+          iterationDropdown.display("IterationSelectorSpan", iterationSelected);
+
+          var config = { label : "Select a release: " };
+          releaseDropdown = new rally.sdk.ui.ReleaseDropdown(config, rallyDataSource);
+          releaseDropdown.addEventListener("onDataRetrieved", onDataRetrieved);
+          releaseDropdown.display("ReleaseSelectorSpan", releaseSelected);
+
+          $('#radio-all').change(function() {
+            getAll();
+          });
+
+      }
+
+      rally.addOnLoad(onLoad);
+
+    </script>
+</head>
+  <body>
+    <div class="selectors">
+      <span id="ReleaseSelectorDiv" class="period-selector">
+        <span id="ReleaseSelectorSpan"></span>
+      </span>
+      <em>OR</em>
+      <span id="IterationSelectorDiv" class="period-selector">
+        <span id="IterationSelectorSpan"></span>
+      </span>
+      <em>OR</em>
+      <span id="AllSelectorDiv" class="period-selector">
+        <span id="AllSelectorSpan"><input type="radio" name="radio-all" id="radio-all" value="All"/>Last 6 Months</span>
+      </span>
+    </div>
+
+    <div id="meter" class="meters">
+      Querying Stories:
+      <progress id="stories_progress" class="query_progress">
+      </progress>
+      ... Querying Test cases:
+      <progress id="test_cases_progress" class="query_progress">
+      </progress>
+      ... Querying Test case results:
+      <progress id="test_case_results_progress" class="query_progress">
+      </progress>
+    </div>
+
+    <div id="visualization" style="width: 600px; height: 400px;"></div>
+</body>
+</html>
