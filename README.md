@@ -9,4 +9,4 @@ Create a Custom HTML app in Rally, and add the source of `App.html` to it. That'
 
 
 ## Credits
-Created by Sagi Smolarski, commissioned by James Janisse @ TomTom, who graciously suggested to share it with the community
+Created by Sagi Smolarski @ AgileSparks, commissioned by James Janisse @ TomTom, who graciously suggested to share it with the community
